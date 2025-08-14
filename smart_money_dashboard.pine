@@ -1,0 +1,242 @@
+//@version=6
+indicator("Smart Money Dashboard", "SMD", overlay=true)
+
+// ================================================================================
+// INPUT SETTINGS
+// ================================================================================
+
+// Swing detection lookback period
+swing_lookback = input.int(5, "Swing Lookback Period", minval=3, maxval=20)
+
+// FVG minimum size filter (in points)
+fvg_min_size = input.float(0.0001, "FVG Minimum Size", minval=0.0001, step=0.0001)
+
+// ================================================================================
+// MARKET STRUCTURE SHIFT (MSS) DETECTION FUNCTIONS
+// ================================================================================
+
+// Function to detect swing highs
+is_swing_high(len) =>
+    high[len] == ta.highest(high, len * 2 + 1)
+
+// Function to detect swing lows  
+is_swing_low(len) =>
+    low[len] == ta.lowest(low, len * 2 + 1)
+
+// Function to detect bullish MSS
+detect_bullish_mss(lookback) =>
+    var float last_swing_low = na
+    var float last_swing_high = na
+    var int last_swing_low_bar = na
+    var int last_swing_high_bar = na
+    
+    // Update swing points
+    if is_swing_low(lookback)
+        last_swing_low := low[lookback]
+        last_swing_low_bar := bar_index - lookback
+        
+    if is_swing_high(lookback)
+        last_swing_high := high[lookback]
+        last_swing_high_bar := bar_index - lookback
+    
+    // Check for bullish MSS: break above recent swing high that occurred after swing low
+    bullish_mss = false
+    if not na(last_swing_high) and not na(last_swing_low) and not na(last_swing_low_bar) and not na(last_swing_high_bar)
+        if last_swing_low_bar < last_swing_high_bar and close > last_swing_high
+            bullish_mss := true
+    
+    bullish_mss
+
+// Function to detect bearish MSS
+detect_bearish_mss(lookback) =>
+    var float last_swing_low = na
+    var float last_swing_high = na
+    var int last_swing_low_bar = na
+    var int last_swing_high_bar = na
+    
+    // Update swing points
+    if is_swing_low(lookback)
+        last_swing_low := low[lookback]
+        last_swing_low_bar := bar_index - lookback
+        
+    if is_swing_high(lookback)
+        last_swing_high := high[lookback]
+        last_swing_high_bar := bar_index - lookback
+    
+    // Check for bearish MSS: break below recent swing low that occurred after swing high
+    bearish_mss = false
+    if not na(last_swing_high) and not na(last_swing_low) and not na(last_swing_low_bar) and not na(last_swing_high_bar)
+        if last_swing_high_bar < last_swing_low_bar and close < last_swing_low
+            bearish_mss := true
+    
+    bearish_mss
+
+// ================================================================================
+// FAIR VALUE GAP (FVG) DETECTION FUNCTIONS
+// ================================================================================
+
+// Function to detect bullish FVG
+detect_bullish_fvg() =>
+    // Bullish FVG: gap between high[2] and low[0], with high[1] not overlapping
+    bullish_gap_exists = low > high[2] and high[1] < low and low[1] < low
+    gap_size = bullish_gap_exists ? low - high[2] : 0
+    
+    // Check if gap meets minimum size requirement
+    valid_gap = bullish_gap_exists and gap_size >= fvg_min_size
+    
+    // Track recent FVG activity
+    var float recent_bull_fvg_top = na
+    var float recent_bull_fvg_bottom = na
+    var int recent_bull_fvg_bar = na
+    var bool bull_fvg_active = false
+    
+    // Update recent FVG when a new valid gap is found
+    if valid_gap
+        recent_bull_fvg_top := low
+        recent_bull_fvg_bottom := high[2]
+        recent_bull_fvg_bar := bar_index
+        bull_fvg_active := true
+    
+    // Check if price has interacted with recent FVG (within last 20 bars)
+    fvg_interaction = false
+    if bull_fvg_active and not na(recent_bull_fvg_top) and not na(recent_bull_fvg_bottom) and not na(recent_bull_fvg_bar)
+        bars_since_fvg = bar_index - recent_bull_fvg_bar
+        if bars_since_fvg <= 20
+            // Check if price has entered the FVG zone
+            if low <= recent_bull_fvg_top and high >= recent_bull_fvg_bottom
+                fvg_interaction := true
+        else
+            // Reset if too much time has passed
+            bull_fvg_active := false
+    
+    [valid_gap, fvg_interaction]
+
+// Function to detect bearish FVG
+detect_bearish_fvg() =>
+    // Bearish FVG: gap between low[2] and high[0], with low[1] not overlapping
+    bearish_gap_exists = high < low[2] and low[1] > high and high[1] > high
+    gap_size = bearish_gap_exists ? low[2] - high : 0
+    
+    // Check if gap meets minimum size requirement
+    valid_gap = bearish_gap_exists and gap_size >= fvg_min_size
+    
+    // Track recent FVG activity
+    var float recent_bear_fvg_top = na
+    var float recent_bear_fvg_bottom = na
+    var int recent_bear_fvg_bar = na
+    var bool bear_fvg_active = false
+    
+    // Update recent FVG when a new valid gap is found
+    if valid_gap
+        recent_bear_fvg_top := low[2]
+        recent_bear_fvg_bottom := high
+        recent_bear_fvg_bar := bar_index
+        bear_fvg_active := true
+    
+    // Check if price has interacted with recent FVG (within last 20 bars)
+    fvg_interaction = false
+    if bear_fvg_active and not na(recent_bear_fvg_top) and not na(recent_bear_fvg_bottom) and not na(recent_bear_fvg_bar)
+        bars_since_fvg = bar_index - recent_bear_fvg_bar
+        if bars_since_fvg <= 20
+            // Check if price has entered the FVG zone
+            if low <= recent_bear_fvg_top and high >= recent_bear_fvg_bottom
+                fvg_interaction := true
+        else
+            // Reset if too much time has passed
+            bear_fvg_active := false
+    
+    [valid_gap, fvg_interaction]
+
+// ================================================================================
+// BIAS DETERMINATION FUNCTION
+// ================================================================================
+
+// Function to determine market bias based on MSS and FVG
+determine_bias() =>
+    // Get MSS signals
+    bull_mss = detect_bullish_mss(swing_lookback)
+    bear_mss = detect_bearish_mss(swing_lookback)
+    
+    // Get FVG signals
+    [bull_fvg_exists, bull_fvg_filled] = detect_bullish_fvg()
+    [bear_fvg_exists, bear_fvg_filled] = detect_bearish_fvg()
+    
+    // Determine bias - prioritize recent signals
+    bias = "Neutral"
+    
+    // Check for bullish conditions
+    bullish_condition = bull_mss and (bull_fvg_exists or bull_fvg_filled)
+    
+    // Check for bearish conditions  
+    bearish_condition = bear_mss and (bear_fvg_exists or bear_fvg_filled)
+    
+    // Apply bias logic
+    if bullish_condition and not bearish_condition
+        bias := "Bullish"
+    else if bearish_condition and not bullish_condition
+        bias := "Bearish"
+    else if bullish_condition and bearish_condition
+        // If both conditions exist, use the most recent MSS
+        bias := "Neutral"  // Default to neutral when conflicting signals
+    
+    bias
+
+// ================================================================================
+// MULTI-TIMEFRAME DATA RETRIEVAL
+// ================================================================================
+
+// Get bias for current timeframe (15m)
+current_bias = determine_bias()
+
+// Get bias for 1-hour timeframe
+h1_bias = request.security(syminfo.tickerid, "60", determine_bias(), lookahead=barmerge.lookahead_off)
+
+// Get bias for 4-hour timeframe  
+h4_bias = request.security(syminfo.tickerid, "240", determine_bias(), lookahead=barmerge.lookahead_off)
+
+// ================================================================================
+// DASHBOARD TABLE CREATION
+// ================================================================================
+
+// Create table in top-right corner
+var table dashboard = table.new(position.top_right, columns=2, rows=4, 
+                               bgcolor=color.new(color.white, 10), 
+                               border_width=1, 
+                               border_color=color.gray)
+
+// Function to get color based on bias
+get_bias_color(bias_value) =>
+    switch bias_value
+        "Bullish" => color.new(color.green, 20)
+        "Bearish" => color.new(color.red, 20)
+        => color.new(color.gray, 20)
+
+// Function to get text color based on bias
+get_text_color(bias_value) =>
+    switch bias_value
+        "Bullish" => color.green
+        "Bearish" => color.red
+        => color.gray
+
+// Update table on last bar
+if barstate.islast
+    // Header row
+    table.cell(dashboard, 0, 0, "Timeframe", text_color=color.black, text_size=size.small, bgcolor=color.new(color.silver, 30))
+    table.cell(dashboard, 1, 0, "Bias", text_color=color.black, text_size=size.small, bgcolor=color.new(color.silver, 30))
+    
+    // 15-minute row
+    table.cell(dashboard, 0, 1, "15m", text_color=color.black, text_size=size.small, bgcolor=color.new(color.white, 20))
+    table.cell(dashboard, 1, 1, current_bias, text_color=get_text_color(current_bias), text_size=size.small, bgcolor=get_bias_color(current_bias))
+    
+    // 1-hour row
+    table.cell(dashboard, 0, 2, "1h", text_color=color.black, text_size=size.small, bgcolor=color.new(color.white, 20))
+    table.cell(dashboard, 1, 2, h1_bias, text_color=get_text_color(h1_bias), text_size=size.small, bgcolor=get_bias_color(h1_bias))
+    
+    // 4-hour row
+    table.cell(dashboard, 0, 3, "4h", text_color=color.black, text_size=size.small, bgcolor=color.new(color.white, 20))
+    table.cell(dashboard, 1, 3, h4_bias, text_color=get_text_color(h4_bias), text_size=size.small, bgcolor=get_bias_color(h4_bias))
+
+// ================================================================================
+// NO CHART PLOTTING - Dashboard Only
+// ================================================================================
+// All output is contained within the dashboard table as requested
